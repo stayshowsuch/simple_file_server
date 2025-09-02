@@ -1,0 +1,6 @@
+{
+    "port": 18945,
+    "backlog": 100,
+    "thread_pool_size": 64,
+    "root_dir": "/opt/"
+}
