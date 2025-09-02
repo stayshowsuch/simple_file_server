@@ -24,11 +24,16 @@
 ### 编译
 
 1. 将代码保存为 `simple_file_server.c`。
+   
+3. 安装cJSON 库
+   ```bash
+   apt install libcjson-dev
+    ```
 
-2. 使用以下命令编译：
+5. 使用以下命令编译：
 
    ```bash
-   gcc -o simple_file_server simple_file_server.c -lpthread -lrt
+   gcc -o simple_file_server simple_file_server.c -lpthread -lrt -lcjson
    ```
 
    **注意**：若使用完整 cJSON 库，需先安装（Debian 上运行 `sudo apt install libcjson-dev`），并链接 `-lcjson`。
