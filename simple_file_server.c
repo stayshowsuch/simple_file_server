@@ -10,7 +10,8 @@
 #include <sys/sendfile.h>  // 用于零拷贝
 #include <syslog.h>        // 日志兼容
 #include <signal.h>        // 信号处理
-#include <ctype.h>         // MIME辅助
+#include <ctype.h>         
+#include <cjson/cJSON.h> //完整 cJSON 库
 
 #define DEFAULT_PORT 18945
 #define DEFAULT_BACKLOG 100
@@ -19,33 +20,6 @@
 #define MAX_BUFFER 1024
 #define QUEUE_SIZE 1024
 
-// 嵌入cJSON库（简化版，完整版可从github下载，此为最小实现）
-typedef struct cJSON {
-    struct cJSON *next, *prev, *child;
-    int type;
-    char *valuestring;
-    int valueint;
-    double valuedouble;
-    char *string;
-} cJSON;
-
-enum { cJSON_Invalid = (0), cJSON_False = (1 << 0), cJSON_True = (1 << 1), cJSON_NULL = (1 << 2),
-       cJSON_Number = (1 << 3), cJSON_String = (1 << 4), cJSON_Array = (1 << 5), cJSON_Object = (1 << 6),
-       cJSON_Raw = (1 << 7) };
-
-cJSON *cJSON_Parse(const char *value);
-void cJSON_Delete(cJSON *c);
-char *cJSON_Print(const cJSON *item);
-cJSON *cJSON_GetObjectItem(const cJSON *object, const char *string);
-int cJSON_GetObjectItemInt(const cJSON *object, const char *string, int default_val);
-char *cJSON_GetObjectItemString(const cJSON *object, const char *string, char *default_val);
-
-// cJSON最小实现（实际使用时替换为完整库，此为占位）
-cJSON *cJSON_Parse(const char *value) { /* 实现解析 */ return NULL; }
-void cJSON_Delete(cJSON *c) { /* 释放 */ }
-cJSON *cJSON_GetObjectItem(const cJSON *object, const char *string) { return NULL; }
-int cJSON_GetObjectItemInt(const cJSON *object, const char *string, int default_val) { return default_val; }
-char *cJSON_GetObjectItemString(const cJSON *object, const char *string, char *default_val) { return strdup(default_val); }
 
 // 配置结构体
 typedef struct {
@@ -75,21 +49,60 @@ typedef struct {
 const char *get_mime_type(const char *filename) {
     char *ext = strrchr(filename, '.');
     if (!ext) return "application/octet-stream";
-    if (strcasecmp(ext, ".txt") == 0) return "text/plain";
-    if (strcasecmp(ext, ".html") == 0) return "text/html";
-    if (strcasecmp(ext, ".jpg") == 0) return "image/jpeg";
-    // 添加更多...
+    ext++; // 跳过 '.'
+
+    struct mime_map {
+        const char *ext;
+        const char *type;
+    } mime_types[] = {
+        {"txt", "text/plain"},
+        {"html", "text/html"},
+        {"htm", "text/html"},
+        {"jpg", "image/jpeg"},
+        {"jpeg", "image/jpeg"},
+        {"png", "image/png"},
+        {"gif", "image/gif"},
+        {"pdf", "application/pdf"},
+        {"js", "application/javascript"},
+        {"css", "text/css"},
+        {"json", "application/json"},
+        {"mp4", "video/mp4"},
+        {NULL, NULL}
+    };
+
+    for (int i = 0; mime_types[i].ext; i++) {
+        if (strcasecmp(ext, mime_types[i].ext) == 0) {
+            return mime_types[i].type;
+        }
+    }
     return "application/octet-stream";
 }
 
 // 处理客户端（优化版）
+// URL 解码函数
+char *url_decode(const char *src) {
+    char *decoded = malloc(strlen(src) + 1);
+    char *dst = decoded;
+    while (*src) {
+        if (*src == '%' && src[1] && src[2]) {
+            char hex[3] = {src[1], src[2], 0};
+            *dst++ = (char)strtol(hex, NULL, 16);
+            src += 3;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+    return decoded;
+}
+//回应
 void *handle_client(void *arg) {
     client_data_t *data = (client_data_t *)arg;
     int client_sock = data->client_sock;
     char *root_dir = data->root_dir;
     char buffer[MAX_BUFFER];
-    char file_path[256];
-    int bytes_read;
+    char *file_path = NULL;
+    int bytes_read, fd = -1;
 
     bytes_read = read(client_sock, buffer, MAX_BUFFER - 1);
     if (bytes_read <= 0) goto cleanup;
@@ -100,64 +113,98 @@ void *handle_client(void *arg) {
     if (sscanf(buffer, "%s %s %s", method, path, version) != 3) {
         const char *err = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
         write(client_sock, err, strlen(err));
+        syslog(LOG_WARNING, "Bad request received");
         goto cleanup;
     }
 
     if (strcmp(method, "GET") != 0) {
         const char *err = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n";
         write(client_sock, err, strlen(err));
+        syslog(LOG_WARNING, "Method not allowed: %s", method);
         goto cleanup;
     }
 
-    // 忽略query string
     char *query = strchr(path, '?');
     if (query) *query = '\0';
 
-    char *filename = path[0] == '/' ? path + 1 : path;
+    char *filename = url_decode(path[0] == '/' ? path + 1 : path);
     if (strlen(filename) == 0) {
         const char *err = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
         write(client_sock, err, strlen(err));
+        syslog(LOG_WARNING, "Empty filename requested");
+        free(filename);
         goto cleanup;
     }
 
-    // 防止路径遍历（虽模式无视安全，但添加以兼容）
-    if (strstr(filename, "..")) {
+    // 动态分配 file_path
+    size_t path_len = strlen(root_dir) + strlen(filename) + 2;
+    file_path = malloc(path_len);
+    if (!file_path) {
+        const char *err = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+        write(client_sock, err, strlen(err));
+        syslog(LOG_ERR, "Memory allocation failed for file_path");
+        free(filename);
+        goto cleanup;
+    }
+    snprintf(file_path, path_len, "%s/%s", root_dir, filename);
+
+    // 使用 realpath 规范化路径
+    char *real_path = realpath(file_path, NULL);
+    if (!real_path || strncmp(real_path, root_dir, strlen(root_dir)) != 0) {
         const char *err = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
         write(client_sock, err, strlen(err));
+        syslog(LOG_WARNING, "Path traversal attempt: %s", file_path);
+        free(filename);
+        free(real_path);
         goto cleanup;
     }
 
-    snprintf(file_path, sizeof(file_path), "%s/%s", root_dir, filename);
-
-    int fd = open(file_path, O_RDONLY);
+    fd = open(real_path, O_RDONLY);
     if (fd < 0) {
         const char *err = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
         write(client_sock, err, strlen(err));
+        syslog(LOG_INFO, "File not found: %s", real_path);
+        free(filename);
+        free(real_path);
         goto cleanup;
     }
 
     struct stat file_stat;
-    if (fstat(fd, &file_stat) < 0) {
+    if (fstat(fd, &file_stat) < 0 || !S_ISREG(file_stat.st_mode)) {
+        const char *err = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+        write(client_sock, err, strlen(err));
+        syslog(LOG_WARNING, "Invalid file type: %s", real_path);
+        free(filename);
+        free(real_path);
+        close(fd);
+        goto cleanup;
+    }
+
+    char header[1024]; // 增大缓冲区
+    size_t header_len = snprintf(header, sizeof(header),
+                            "HTTP/1.1 200 OK\r\n"
+                            "Content-Length: %lld\r\n"
+                            "Content-Type: %s\r\n"
+                            "\r\n",
+                            (long long)file_stat.st_size, get_mime_type(filename));
+    if (header_len >= sizeof(header)) {
         const char *err = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
         write(client_sock, err, strlen(err));
+        syslog(LOG_ERR, "Header buffer overflow for file %s", filename);
+        free(filename);
+        free(real_path);
         close(fd);
         goto cleanup;
     }
-
-    char header[512];
-    snprintf(header, sizeof(header),
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Length: %lld\r\n"
-             "Content-Type: %s\r\n"
-             "\r\n",
-             (long long)file_stat.st_size, get_mime_type(filename));
 
     if (write(client_sock, header, strlen(header)) < 0) {
+        syslog(LOG_ERR, "Failed to send header for %s", real_path);
+        free(filename);
+        free(real_path);
         close(fd);
         goto cleanup;
     }
 
-    // 零拷贝发送
 #ifdef __linux__
     off_t offset = 0;
     sendfile(client_sock, fd, &offset, file_stat.st_size);
@@ -168,9 +215,12 @@ void *handle_client(void *arg) {
     }
 #endif
 
+    free(filename);
+    free(real_path);
     close(fd);
 
 cleanup:
+    if (file_path) free(file_path);
     close(client_sock);
     free(data);
     return NULL;
@@ -205,12 +255,20 @@ config_t load_config() {
     config.root_dir = strdup(DEFAULT_ROOT_DIR);
 
     FILE *fp = fopen("config.json", "r");
-    if (!fp) return config;
+    if (!fp) {
+        syslog(LOG_WARNING, "Config file not found, using defaults");
+        return config;
+    }
 
     fseek(fp, 0, SEEK_END);
     long len = ftell(fp);
     fseek(fp, 0, SEEK_SET);
     char *json_str = malloc(len + 1);
+    if (!json_str) {
+        syslog(LOG_ERR, "Memory allocation failed for config");
+        fclose(fp);
+        return config;
+    }
     fread(json_str, 1, len, fp);
     json_str[len] = '\0';
     fclose(fp);
@@ -218,15 +276,44 @@ config_t load_config() {
     cJSON *json = cJSON_Parse(json_str);
     free(json_str);
 
-    if (json) {
-        config.port = cJSON_GetObjectItemInt(json, "port", DEFAULT_PORT);
-        config.backlog = cJSON_GetObjectItemInt(json, "backlog", DEFAULT_BACKLOG);
-        config.thread_pool_size = cJSON_GetObjectItemInt(json, "thread_pool_size", DEFAULT_THREAD_POOL_SIZE);
-        char *dir = cJSON_GetObjectItemString(json, "root_dir", DEFAULT_ROOT_DIR);
-        free(config.root_dir);
-        config.root_dir = dir;
-        cJSON_Delete(json);
+    if (!json) {
+        syslog(LOG_ERR, "Failed to parse config.json: %s", cJSON_GetErrorPtr());
+        return config;
     }
+
+    // 验证配置项
+    int port = cJSON_GetObjectItemInt(json, "port", DEFAULT_PORT);
+    if (port < 1 || port > 65535) {
+        syslog(LOG_ERR, "Invalid port %d, using default %d", port, DEFAULT_PORT);
+        port = DEFAULT_PORT;
+    }
+
+    int backlog = cJSON_GetObjectItemInt(json, "backlog", DEFAULT_BACKLOG);
+    if (backlog < 1) {
+        syslog(LOG_ERR, "Invalid backlog %d, using default %d", backlog, DEFAULT_BACKLOG);
+        backlog = DEFAULT_BACKLOG;
+    }
+
+    int thread_pool_size = cJSON_GetObjectItemInt(json, "thread_pool_size", DEFAULT_THREAD_POOL_SIZE);
+    if (thread_pool_size < 1) {
+        syslog(LOG_ERR, "Invalid thread_pool_size %d, using default %d", thread_pool_size, DEFAULT_THREAD_POOL_SIZE);
+        thread_pool_size = DEFAULT_THREAD_POOL_SIZE;
+    }
+
+    char *dir = cJSON_GetObjectItemString(json, "root_dir", DEFAULT_ROOT_DIR);
+    struct stat dir_stat;
+    if (stat(dir, &dir_stat) != 0 || !S_ISDIR(dir_stat.st_mode)) {
+        syslog(LOG_ERR, "Invalid root_dir %s, using default %s", dir, DEFAULT_ROOT_DIR);
+        free(dir);
+        dir = strdup(DEFAULT_ROOT_DIR);
+    }
+
+    config.port = port;
+    config.backlog = backlog;
+    config.thread_pool_size = thread_pool_size;
+    free(config.root_dir);
+    config.root_dir = dir;
+    cJSON_Delete(json);
 
     return config;
 }
