@@ -39,7 +39,7 @@
 
 ## 使用方法
 
-通过目录端口配置指定目录运行服务器以提供文件：
+通过默认端口配置指定目录运行服务器以提供文件：
 
 ```bash
 ./simple_file_server /path/to/directory
