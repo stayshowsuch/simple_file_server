@@ -246,7 +246,7 @@ void *worker_thread(void *arg) {
     return NULL;
 }
 
-// 加载config.json
+// 加载 config.json
 config_t load_config() {
     config_t config;
     config.port = DEFAULT_PORT;
@@ -275,37 +275,56 @@ config_t load_config() {
 
     cJSON *json = cJSON_Parse(json_str);
     free(json_str);
-
     if (!json) {
         syslog(LOG_ERR, "Failed to parse config.json: %s", cJSON_GetErrorPtr());
         return config;
     }
 
-    // 验证配置项
-    int port = cJSON_GetObjectItemInt(json, "port", DEFAULT_PORT);
-    if (port < 1 || port > 65535) {
-        syslog(LOG_ERR, "Invalid port %d, using default %d", port, DEFAULT_PORT);
-        port = DEFAULT_PORT;
+    // 获取 port
+    cJSON *port_item = cJSON_GetObjectItem(json, "port");
+    int port = DEFAULT_PORT;
+    if (port_item && cJSON_IsNumber(port_item)) {
+        port = port_item->valueint;
+        if (port < 1 || port > 65535) {
+            syslog(LOG_ERR, "Invalid port %d, using default %d", port, DEFAULT_PORT);
+            port = DEFAULT_PORT;
+        }
     }
 
-    int backlog = cJSON_GetObjectItemInt(json, "backlog", DEFAULT_BACKLOG);
-    if (backlog < 1) {
-        syslog(LOG_ERR, "Invalid backlog %d, using default %d", backlog, DEFAULT_BACKLOG);
-        backlog = DEFAULT_BACKLOG;
+    // 获取 backlog
+    cJSON *backlog_item = cJSON_GetObjectItem(json, "backlog");
+    int backlog = DEFAULT_BACKLOG;
+    if (backlog_item && cJSON_IsNumber(backlog_item)) {
+        backlog = backlog_item->valueint;
+        if (backlog < 1) {
+            syslog(LOG_ERR, "Invalid backlog %d, using default %d", backlog, DEFAULT_BACKLOG);
+            backlog = DEFAULT_BACKLOG;
+        }
     }
 
-    int thread_pool_size = cJSON_GetObjectItemInt(json, "thread_pool_size", DEFAULT_THREAD_POOL_SIZE);
-    if (thread_pool_size < 1) {
-        syslog(LOG_ERR, "Invalid thread_pool_size %d, using default %d", thread_pool_size, DEFAULT_THREAD_POOL_SIZE);
-        thread_pool_size = DEFAULT_THREAD_POOL_SIZE;
+    // 获取 thread_pool_size
+    cJSON *thread_pool_item = cJSON_GetObjectItem(json, "thread_pool_size");
+    int thread_pool_size = DEFAULT_THREAD_POOL_SIZE;
+    if (thread_pool_item && cJSON_IsNumber(thread_pool_item)) {
+        thread_pool_size = thread_pool_item->valueint;
+        if (thread_pool_size < 1) {
+            syslog(LOG_ERR, "Invalid thread_pool_size %d, using default %d", thread_pool_size, DEFAULT_THREAD_POOL_SIZE);
+            thread_pool_size = DEFAULT_THREAD_POOL_SIZE;
+        }
     }
 
-    char *dir = cJSON_GetObjectItemString(json, "root_dir", DEFAULT_ROOT_DIR);
-    struct stat dir_stat;
-    if (stat(dir, &dir_stat) != 0 || !S_ISDIR(dir_stat.st_mode)) {
-        syslog(LOG_ERR, "Invalid root_dir %s, using default %s", dir, DEFAULT_ROOT_DIR);
+    // 获取 root_dir
+    cJSON *dir_item = cJSON_GetObjectItem(json, "root_dir");
+    char *dir = strdup(DEFAULT_ROOT_DIR);
+    if (dir_item && cJSON_IsString(dir_item)) {
         free(dir);
-        dir = strdup(DEFAULT_ROOT_DIR);
+        dir = strdup(dir_item->valuestring);
+        struct stat dir_stat;
+        if (stat(dir, &dir_stat) != 0 || !S_ISDIR(dir_stat.st_mode)) {
+            syslog(LOG_ERR, "Invalid root_dir %s, using default %s", dir, DEFAULT_ROOT_DIR);
+            free(dir);
+            dir = strdup(DEFAULT_ROOT_DIR);
+        }
     }
 
     config.port = port;
