@@ -18,7 +18,7 @@
 
 - **操作系统**：Debian（或其他 POSIX 兼容系统）。
 - **编译器**：GCC。
-- **库**：`pthread`、`rt`（Debian 默认包含）、`cJSON`（需要安装）。
+- **库**：`pthread`、`rt`（Debian 默认包含）,`cJSON`（需要安装）。
 
 ### 编译
 
