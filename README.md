@@ -18,8 +18,7 @@
 
 - **操作系统**：Debian（或其他 POSIX 兼容系统）。
 - **编译器**：GCC。
-- **库**：`pthread`、`rt`（Debian 默认包含）。
-- **cJSON**：嵌入简化版 cJSON；需完整功能可从 cJSON GitHub 下载。
+- **库**：`pthread`、`rt`（Debian 默认包含）、`cJSON`（需要安装）。
 
 ### 编译
 
@@ -36,11 +35,11 @@
    gcc -o simple_file_server simple_file_server.c -lpthread -lrt -lcjson
    ```
 
-   **注意**：若使用完整 cJSON 库，需先安装（Debian 上运行 `sudo apt install libcjson-dev`），并链接 `-lcjson`。
+   **注意**：使用完整 cJSON 库，需先安装（Debian 上运行 `sudo apt install libcjson-dev`），并链接 `-lcjson`。
 
 ## 使用方法
 
-通过指定目录运行服务器以提供文件：
+通过目录端口配置指定目录运行服务器以提供文件：
 
 ```bash
 ./simple_file_server /path/to/directory
@@ -76,8 +75,6 @@
 
 - 仅支持 HTTP/1.1 GET 请求，不支持 POST、PUT 等方法。
 - 无 HTTPS 支持，建议使用反向代理（如 Nginx）实现安全连接。
-- 提供基本路径遍历防护，生产环境需额外安全加固。
-- `cJSON` 解析假设简单 JSON 结构，复杂结构可能需更新库。
 
 ## 性能
 
